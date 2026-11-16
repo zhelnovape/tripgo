@@ -25,7 +25,7 @@ var tripColumns = []string{
 	"start_latitude", "start_longitude",
 	"end_latitude", "end_longitude",
 	"price", statusColumn,
-	"started_at", "finished_at",
+	"started_at", "finished_at", "last_position_at",
 	"created_at", "updated_at",
 }
 

@@ -15,6 +15,8 @@ import (
 	"github.com/zhelnovape/template/internal/config"
 	"github.com/zhelnovape/template/internal/http/health"
 	"github.com/zhelnovape/template/internal/http/middleware"
+	positionlisthttp "github.com/zhelnovape/template/internal/http/position/list"
+	positionsavehttp "github.com/zhelnovape/template/internal/http/position/save"
 	"github.com/zhelnovape/template/internal/http/ready"
 	createhttp "github.com/zhelnovape/template/internal/http/trip/create"
 	finishhttp "github.com/zhelnovape/template/internal/http/trip/finish"
@@ -23,7 +25,10 @@ import (
 	"github.com/zhelnovape/template/internal/infra/postgres"
 	"github.com/zhelnovape/template/internal/infra/postgres/transaction"
 	"github.com/zhelnovape/template/internal/infra/telemetry"
+	positionrepo "github.com/zhelnovape/template/internal/repository/position"
 	triprepo "github.com/zhelnovape/template/internal/repository/trip"
+	positionlistuc "github.com/zhelnovape/template/internal/usecase/position/list"
+	positionsaveuc "github.com/zhelnovape/template/internal/usecase/position/save"
 	createuc "github.com/zhelnovape/template/internal/usecase/trip/create"
 	finishuc "github.com/zhelnovape/template/internal/usecase/trip/finish"
 	getuc "github.com/zhelnovape/template/internal/usecase/trip/get"
@@ -100,13 +105,24 @@ func newHandler(cfg *config.Config, c *Container, meter metric.Meter) (http.Hand
 		return nil, fmt.Errorf("create trips completed counter: %w", err)
 	}
 
+	positionsSaved, err := meter.Int64Counter("tripgo.positions.saved",
+		metric.WithUnit("{position}"),
+		metric.WithDescription("Number of saved trip positions."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create positions saved counter: %w", err)
+	}
+
 	txManager := transaction.New(c.pool, cfg.DB.QueryTimeout)
 	tripRepo := triprepo.New(c.pool, cfg.DB.QueryTimeout)
+	positionRepo := positionrepo.New(c.pool, cfg.DB.QueryTimeout)
 	clk := clock.New()
 
 	createTrip := createuc.New(tripRepo, txManager, clk, c.Logger, tripsCreated)
 	getTrip := getuc.New(tripRepo)
 	finishTrip := finishuc.New(tripRepo, txManager, clk, c.Logger, tripsCompleted)
+	savePosition := positionsaveuc.New(tripRepo, positionRepo, txManager, clk, positionsSaved)
+	listPositions := positionlistuc.New(tripRepo, positionRepo)
 
 	router := chi.NewRouter()
 	router.Method(http.MethodGet, "/health", health.New())
@@ -115,6 +131,8 @@ func newHandler(cfg *config.Config, c *Container, meter metric.Meter) (http.Hand
 		r.Method(http.MethodPost, "/", createhttp.New(createTrip, c.Logger))
 		r.Method(http.MethodGet, "/{tripId}", gethttp.New(getTrip, c.Logger))
 		r.Method(http.MethodPost, "/{tripId}/finish", finishhttp.New(finishTrip, c.Logger))
+		r.Method(http.MethodPost, "/{tripId}/positions", positionsavehttp.New(savePosition, c.Logger))
+		r.Method(http.MethodGet, "/{tripId}/positions", positionlisthttp.New(listPositions, c.Logger))
 	})
 
 	metrics, err := middleware.Metrics(meter, router)

@@ -20,7 +20,7 @@ func scanTrip(row pgx.Row) (*domain.Trip, error) {
 		&t.Start.Latitude, &t.Start.Longitude,
 		&t.End.Latitude, &t.End.Longitude,
 		&t.Price, &status,
-		&t.StartedAt, &t.FinishedAt,
+		&t.StartedAt, &t.FinishedAt, &t.LastPositionAt,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {
