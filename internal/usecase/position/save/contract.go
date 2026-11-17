@@ -20,6 +20,10 @@ type (
 		Save(ctx context.Context, p *trip.Position) error
 	}
 
+	positionRequestCanceller interface {
+		Cancel(tripID uuid.UUID)
+	}
+
 	txManager interface {
 		Do(ctx context.Context, fn func(ctx context.Context) error) error
 	}

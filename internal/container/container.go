@@ -32,6 +32,7 @@ import (
 	createuc "github.com/zhelnovape/template/internal/usecase/trip/create"
 	finishuc "github.com/zhelnovape/template/internal/usecase/trip/finish"
 	getuc "github.com/zhelnovape/template/internal/usecase/trip/get"
+	positionsworker "github.com/zhelnovape/template/internal/worker/positions"
 )
 
 const (
@@ -40,10 +41,11 @@ const (
 )
 
 type Container struct {
-	Server    *http.Server
-	Logger    *slog.Logger
-	pool      *pgxpool.Pool
-	telemetry *telemetry.Telemetry
+	Server           *http.Server
+	Logger           *slog.Logger
+	PositionRequests *positionsworker.Queue
+	pool             *pgxpool.Pool
+	telemetry        *telemetry.Telemetry
 }
 
 func New(ctx context.Context, cfg *config.Config) (*Container, error) {
@@ -116,12 +118,13 @@ func newHandler(cfg *config.Config, c *Container, meter metric.Meter) (http.Hand
 	txManager := transaction.New(c.pool, cfg.DB.QueryTimeout)
 	tripRepo := triprepo.New(c.pool, cfg.DB.QueryTimeout)
 	positionRepo := positionrepo.New(c.pool, cfg.DB.QueryTimeout)
+	c.PositionRequests = positionsworker.NewQueue(cfg.Positions.QueueSize)
 	clk := clock.New()
 
 	createTrip := createuc.New(tripRepo, txManager, clk, c.Logger, tripsCreated)
 	getTrip := getuc.New(tripRepo)
 	finishTrip := finishuc.New(tripRepo, txManager, clk, c.Logger, tripsCompleted)
-	savePosition := positionsaveuc.New(tripRepo, positionRepo, txManager, clk, positionsSaved)
+	savePosition := positionsaveuc.New(tripRepo, positionRepo, c.PositionRequests, txManager, clk, positionsSaved)
 	listPositions := positionlistuc.New(tripRepo, positionRepo)
 
 	router := chi.NewRouter()

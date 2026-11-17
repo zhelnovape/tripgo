@@ -13,6 +13,7 @@ import (
 type UseCase struct {
 	trips     tripRepository
 	positions positionRepository
+	requests  positionRequestCanceller
 	txManager txManager
 	clock     clock
 	saved     metric.Int64Counter
@@ -21,11 +22,19 @@ type UseCase struct {
 func New(
 	trips tripRepository,
 	positions positionRepository,
+	requests positionRequestCanceller,
 	txManager txManager,
 	clk clock,
 	saved metric.Int64Counter,
 ) *UseCase {
-	return &UseCase{trips: trips, positions: positions, txManager: txManager, clock: clk, saved: saved}
+	return &UseCase{
+		trips:     trips,
+		positions: positions,
+		requests:  requests,
+		txManager: txManager,
+		clock:     clk,
+		saved:     saved,
+	}
 }
 
 func (u *UseCase) Execute(ctx context.Context, in model.SavePosition) (*trip.Position, error) {
@@ -55,6 +64,7 @@ func (u *UseCase) Execute(ctx context.Context, in model.SavePosition) (*trip.Pos
 		return nil, err
 	}
 
+	u.requests.Cancel(p.TripID)
 	u.saved.Add(ctx, 1)
 	return p, nil
 }

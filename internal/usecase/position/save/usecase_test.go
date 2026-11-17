@@ -27,6 +27,7 @@ var (
 type deps struct {
 	trips     *MocktripRepository
 	positions *MockpositionRepository
+	requests  *MockpositionRequestCanceller
 	txManager *MocktxManager
 	clock     *Mockclock
 	metrics   *sdkmetric.ManualReader
@@ -39,6 +40,7 @@ func newUseCase(t *testing.T) (*save.UseCase, deps) {
 	d := deps{
 		trips:     NewMocktripRepository(ctrl),
 		positions: NewMockpositionRepository(ctrl),
+		requests:  NewMockpositionRequestCanceller(ctrl),
 		txManager: NewMocktxManager(ctrl),
 		clock:     NewMockclock(ctrl),
 		metrics:   sdkmetric.NewManualReader(),
@@ -57,7 +59,7 @@ func newUseCase(t *testing.T) (*save.UseCase, deps) {
 		}).
 		AnyTimes()
 
-	return save.New(d.trips, d.positions, d.txManager, d.clock, saved), d
+	return save.New(d.trips, d.positions, d.requests, d.txManager, d.clock, saved), d
 }
 
 func (d deps) savedPositions(t *testing.T) int64 {
@@ -108,6 +110,7 @@ func TestUseCase_Execute_Success(t *testing.T) {
 				p.ID = 42
 				return nil
 			}),
+		d.requests.EXPECT().Cancel(active.ID),
 	)
 
 	got, err := uc.Execute(context.Background(), input(active.ID))
