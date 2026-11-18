@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -26,6 +27,7 @@ type Positions struct {
 }
 
 type Push struct {
+	HTTPURL        string
 	RequestTimeout time.Duration
 }
 
@@ -138,10 +140,26 @@ func loadPositions(cfg *Config) error {
 	if cfg.Positions.QueueSize, err = getPositiveIntOrDefault("POSITION_QUEUE_SIZE", 100); err != nil {
 		return err
 	}
+	if cfg.Push.HTTPURL, err = getURLOrErr("PUSH_HTTP_URL"); err != nil {
+		return err
+	}
 	if cfg.Push.RequestTimeout, err = getDurOrDefault("PUSH_REQUEST_TIMEOUT", time.Second); err != nil {
 		return err
 	}
 	return nil
+}
+
+func getURLOrErr(varEnv string) (string, error) {
+	val, err := getStrOrErr(varEnv)
+	if err != nil {
+		return "", err
+	}
+
+	u, err := url.Parse(val)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("%s must be an absolute http(s) URL, got %q", varEnv, val)
+	}
+	return val, nil
 }
 
 func getDurOrDefault(varEnv string, def time.Duration) (time.Duration, error) {
