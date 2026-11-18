@@ -34,6 +34,10 @@ func run() error {
 		return fmt.Errorf("build container: %w", err)
 	}
 
+	appCtx, cancelApp := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelApp()
+	c.PositionsPoller.Start(appCtx)
+
 	serveErr := serve(ctx, c.Server, c.Logger)
 
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.ShutdownTimeout)
@@ -71,10 +75,21 @@ func serve(ctx context.Context, srv *http.Server, logger *slog.Logger) error {
 }
 
 func shutdown(ctx context.Context, c *container.Container) error {
-	if err := c.Server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("server forced to shutdown: %w", err)
-	}
-	c.Logger.Info("server stopped gracefully")
+	var errs []error
 
-	return c.Close(ctx)
+	if err := c.Server.Shutdown(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("server forced to shutdown: %w", err))
+	} else {
+		c.Logger.Info("server stopped gracefully")
+	}
+
+	if err := c.PositionsPoller.Stop(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("stop positions poller: %w", err))
+	}
+
+	if err := c.Close(ctx); err != nil {
+		errs = append(errs, err)
+	}
+
+	return errors.Join(errs...)
 }

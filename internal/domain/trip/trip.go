@@ -29,10 +29,11 @@ type Trip struct {
 	Price  int64
 	Status Status
 
-	StartedAt  time.Time
-	FinishedAt *time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	StartedAt      time.Time
+	FinishedAt     *time.Time
+	LastPositionAt *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 func New(userID, driverID uuid.UUID, start, end Point, price int64, startedAt time.Time) (*Trip, error) {
@@ -83,6 +84,13 @@ func (t *Trip) Validate() error {
 		return &ValidationError{Field: "status", Reason: "unknown status"}
 	}
 
+	return nil
+}
+
+func (t *Trip) EnsureActive() error {
+	if t.Status != StatusActive {
+		return ErrTripCompleted
+	}
 	return nil
 }
 

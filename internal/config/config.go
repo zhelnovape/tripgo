@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -14,6 +15,20 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	DB              Database
 	Telemetry       Telemetry
+	Positions       Positions
+	Push            Push
+}
+
+type Positions struct {
+	CheckInterval time.Duration
+	StaleAfter    time.Duration
+	Workers       int
+	QueueSize     int
+}
+
+type Push struct {
+	HTTPURL        string
+	RequestTimeout time.Duration
 }
 
 type HTTP struct {
@@ -103,7 +118,70 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL must be http/protobuf or grpc, got %q", cfg.Telemetry.Protocol)
 	}
 
+	if err := loadPositions(cfg); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+func loadPositions(cfg *Config) error {
+	var err error
+
+	if cfg.Positions.CheckInterval, err = getDurOrDefault("POSITION_CHECK_INTERVAL", 30*time.Second); err != nil {
+		return err
+	}
+	if cfg.Positions.StaleAfter, err = getDurOrDefault("POSITION_STALE_AFTER", 60*time.Second); err != nil {
+		return err
+	}
+	if cfg.Positions.Workers, err = getPositiveIntOrDefault("POSITION_WORKERS", 4); err != nil {
+		return err
+	}
+	if cfg.Positions.QueueSize, err = getPositiveIntOrDefault("POSITION_QUEUE_SIZE", 100); err != nil {
+		return err
+	}
+	if cfg.Push.HTTPURL, err = getURLOrErr("PUSH_HTTP_URL"); err != nil {
+		return err
+	}
+	if cfg.Push.RequestTimeout, err = getDurOrDefault("PUSH_REQUEST_TIMEOUT", time.Second); err != nil {
+		return err
+	}
+	return nil
+}
+
+func getURLOrErr(varEnv string) (string, error) {
+	val, err := getStrOrErr(varEnv)
+	if err != nil {
+		return "", err
+	}
+
+	u, err := url.Parse(val)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("%s must be an absolute http(s) URL, got %q", varEnv, val)
+	}
+	return val, nil
+}
+
+func getDurOrDefault(varEnv string, def time.Duration) (time.Duration, error) {
+	if os.Getenv(varEnv) == "" {
+		return def, nil
+	}
+	return getDurOrErr(varEnv)
+}
+
+func getPositiveIntOrDefault(varEnv string, def int) (int, error) {
+	if os.Getenv(varEnv) == "" {
+		return def, nil
+	}
+
+	num, err := getInt32OrErr(varEnv)
+	if err != nil {
+		return 0, err
+	}
+	if num == 0 {
+		return 0, fmt.Errorf("%s must be positive, got %d", varEnv, num)
+	}
+	return int(num), nil
 }
 
 func getStrOrErr(varEnv string) (string, error) {

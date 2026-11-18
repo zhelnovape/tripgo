@@ -13,8 +13,11 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/zhelnovape/template/internal/config"
+	pushgateway "github.com/zhelnovape/template/internal/gateway/push"
 	"github.com/zhelnovape/template/internal/http/health"
 	"github.com/zhelnovape/template/internal/http/middleware"
+	positionlisthttp "github.com/zhelnovape/template/internal/http/position/list"
+	positionsavehttp "github.com/zhelnovape/template/internal/http/position/save"
 	"github.com/zhelnovape/template/internal/http/ready"
 	createhttp "github.com/zhelnovape/template/internal/http/trip/create"
 	finishhttp "github.com/zhelnovape/template/internal/http/trip/finish"
@@ -23,10 +26,14 @@ import (
 	"github.com/zhelnovape/template/internal/infra/postgres"
 	"github.com/zhelnovape/template/internal/infra/postgres/transaction"
 	"github.com/zhelnovape/template/internal/infra/telemetry"
+	positionrepo "github.com/zhelnovape/template/internal/repository/position"
 	triprepo "github.com/zhelnovape/template/internal/repository/trip"
+	positionlistuc "github.com/zhelnovape/template/internal/usecase/position/list"
+	positionsaveuc "github.com/zhelnovape/template/internal/usecase/position/save"
 	createuc "github.com/zhelnovape/template/internal/usecase/trip/create"
 	finishuc "github.com/zhelnovape/template/internal/usecase/trip/finish"
 	getuc "github.com/zhelnovape/template/internal/usecase/trip/get"
+	positionsworker "github.com/zhelnovape/template/internal/worker/positions"
 )
 
 const (
@@ -35,10 +42,13 @@ const (
 )
 
 type Container struct {
-	Server    *http.Server
-	Logger    *slog.Logger
-	pool      *pgxpool.Pool
-	telemetry *telemetry.Telemetry
+	Server          *http.Server
+	Logger          *slog.Logger
+	PositionsPoller *positionsworker.Poller
+	positionQueue   *positionsworker.Queue
+	pushClient      *pushgateway.Client
+	pool            *pgxpool.Pool
+	telemetry       *telemetry.Telemetry
 }
 
 func New(ctx context.Context, cfg *config.Config) (*Container, error) {
@@ -64,7 +74,16 @@ func New(ctx context.Context, cfg *config.Config) (*Container, error) {
 	}
 	logger.Info("database connected")
 
-	c := &Container{Logger: logger, pool: pool, telemetry: tel}
+	c := &Container{
+		Logger:        logger,
+		pool:          pool,
+		telemetry:     tel,
+		positionQueue: positionsworker.NewQueue(cfg.Positions.QueueSize),
+	}
+
+	if err := newPositionsPoller(cfg, c, meter); err != nil {
+		return nil, errors.Join(err, c.Close(ctx))
+	}
 
 	handler, err := newHandler(cfg, c, meter)
 	if err != nil {
@@ -100,13 +119,24 @@ func newHandler(cfg *config.Config, c *Container, meter metric.Meter) (http.Hand
 		return nil, fmt.Errorf("create trips completed counter: %w", err)
 	}
 
+	positionsSaved, err := meter.Int64Counter("tripgo.positions.saved",
+		metric.WithUnit("{position}"),
+		metric.WithDescription("Number of saved trip positions."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create positions saved counter: %w", err)
+	}
+
 	txManager := transaction.New(c.pool, cfg.DB.QueryTimeout)
 	tripRepo := triprepo.New(c.pool, cfg.DB.QueryTimeout)
+	positionRepo := positionrepo.New(c.pool, cfg.DB.QueryTimeout)
 	clk := clock.New()
 
 	createTrip := createuc.New(tripRepo, txManager, clk, c.Logger, tripsCreated)
 	getTrip := getuc.New(tripRepo)
 	finishTrip := finishuc.New(tripRepo, txManager, clk, c.Logger, tripsCompleted)
+	savePosition := positionsaveuc.New(tripRepo, positionRepo, c.positionQueue, txManager, clk, positionsSaved)
+	listPositions := positionlistuc.New(tripRepo, positionRepo)
 
 	router := chi.NewRouter()
 	router.Method(http.MethodGet, "/health", health.New())
@@ -115,6 +145,8 @@ func newHandler(cfg *config.Config, c *Container, meter metric.Meter) (http.Hand
 		r.Method(http.MethodPost, "/", createhttp.New(createTrip, c.Logger))
 		r.Method(http.MethodGet, "/{tripId}", gethttp.New(getTrip, c.Logger))
 		r.Method(http.MethodPost, "/{tripId}/finish", finishhttp.New(finishTrip, c.Logger))
+		r.Method(http.MethodPost, "/{tripId}/positions", positionsavehttp.New(savePosition, c.Logger))
+		r.Method(http.MethodGet, "/{tripId}/positions", positionlisthttp.New(listPositions, c.Logger))
 	})
 
 	metrics, err := middleware.Metrics(meter, router)
@@ -130,7 +162,44 @@ func newHandler(cfg *config.Config, c *Container, meter metric.Meter) (http.Hand
 	), nil
 }
 
+func newPositionsPoller(cfg *config.Config, c *Container, meter metric.Meter) error {
+	pushClient, err := pushgateway.New(
+		pushgateway.Config{BaseURL: cfg.Push.HTTPURL, RequestTimeout: cfg.Push.RequestTimeout},
+		pushgateway.Telemetry{
+			TracerProvider: c.telemetry.TracerProvider,
+			MeterProvider:  c.telemetry.MeterProvider,
+			Propagator:     c.telemetry.Propagator,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create push client: %w", err)
+	}
+	c.pushClient = pushClient
+
+	c.PositionsPoller, err = positionsworker.New(
+		positionsworker.Config{
+			CheckInterval:  cfg.Positions.CheckInterval,
+			StaleAfter:     cfg.Positions.StaleAfter,
+			Workers:        cfg.Positions.Workers,
+			RequestTimeout: cfg.Push.RequestTimeout,
+		},
+		c.positionQueue,
+		triprepo.New(c.pool, cfg.DB.QueryTimeout),
+		pushClient,
+		c.Logger,
+		c.telemetry.TracerProvider,
+		meter,
+	)
+	if err != nil {
+		return fmt.Errorf("create positions poller: %w", err)
+	}
+	return nil
+}
+
 func (c *Container) Close(ctx context.Context) error {
+	if c.pushClient != nil {
+		c.pushClient.Close()
+	}
 	if err := closePool(ctx, c.pool); err != nil {
 		return err
 	}
